@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Home,
   GitCompare,
@@ -26,8 +26,8 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-import { auth, googleProvider, db } from "./firebase";
-import { signInWithPopup, signOut } from "firebase/auth";
+import { auth, googleProvider, db, analytics, logEvent } from "./firebase";
+import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 import "./index.css";
@@ -45,14 +45,24 @@ const sidebarItems = [
   { icon: Settings, label: "Settings" },
 ];
 
-const chartColors = ["#8b5cf6", "#2563eb", "#14b8a6", "#f59e0b", "#ef4444", "#22c55e"];
+const chartColors = [
+  "#8b5cf6",
+  "#2563eb",
+  "#14b8a6",
+  "#f59e0b",
+  "#ef4444",
+  "#22c55e",
+];
 
 function App() {
   const [user, setUser] = useState(null);
+
   const [candidateInput, setCandidateInput] = useState("A,B,C,D");
   const [voterInput, setVoterInput] = useState(1000);
   const [votingSystem, setVotingSystem] = useState("fptp");
-  const [activeSystemName, setActiveSystemName] = useState("First-Past-The-Post");
+  const [activeSystemName, setActiveSystemName] = useState(
+    "First-Past-The-Post"
+  );
 
   const [voteData, setVoteData] = useState([
     { name: "A", votes: 367, percent: 36.7 },
@@ -70,10 +80,21 @@ function App() {
 
   const [comparison, setComparison] = useState(null);
   const [roundHistory, setRoundHistory] = useState([]);
+
   const [question, setQuestion] = useState("");
   const [aiAnswer, setAiAnswer] = useState("");
+
   const [loading, setLoading] = useState(false);
   const [simulationCount, setSimulationCount] = useState(0);
+  const [latestResult, setLatestResult] = useState(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const lineData = [
     { time: "0%", votes: Math.round(totalVotes * 0.05) },
@@ -87,14 +108,24 @@ function App() {
     try {
       const result = await signInWithPopup(auth, googleProvider);
       setUser(result.user);
-    } catch {
+
+      logEvent(analytics, "google_login", {
+        email: result.user.email,
+      });
+    } catch (error) {
       alert("Google login failed.");
     }
   };
 
-  const logout = async () => {
-    await signOut(auth);
-    setUser(null);
+  const logoutUser = async () => {
+    try {
+      await signOut(auth);
+      setUser(null);
+
+      logEvent(analytics, "google_logout");
+    } catch {
+      alert("Logout failed.");
+    }
   };
 
   const runSimulation = async () => {
@@ -118,7 +149,9 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/simulate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           candidates,
           voters: Number(voterInput),
@@ -143,19 +176,37 @@ function App() {
       setRoundHistory(data.roundHistory || []);
       setSimulationCount((prev) => prev + 1);
 
+      const resultToSave = {
+        candidates,
+        voters: Number(voterInput),
+        system: votingSystem,
+        systemName: data.system,
+        winner: data.winner,
+        totalVotes: data.totalVotes,
+        turnout: data.turnout,
+      };
+
+      setLatestResult(resultToSave);
+
+      logEvent(analytics, "simulation_run", {
+        system: votingSystem,
+        voters: Number(voterInput),
+        winner: data.winner,
+      });
+
       if (user) {
         await addDoc(collection(db, "simulations"), {
           uid: user.uid,
-          candidates,
-          voters: Number(voterInput),
-          system: votingSystem,
-          winner: data.winner,
-          turnout: data.turnout,
+          email: user.email,
+          displayName: user.displayName,
+          ...resultToSave,
           createdAt: serverTimestamp(),
         });
       }
     } catch {
-      alert("Backend connection failed. Render server may be waking up. Try again in 30 seconds.");
+      alert(
+        "Backend connection failed. Render server may be waking up. Please try again in a few seconds."
+      );
     } finally {
       setLoading(false);
     }
@@ -170,15 +221,37 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/ask`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({ question }),
       });
 
       const data = await res.json();
       setAiAnswer(data.answer);
+
+      logEvent(analytics, "ai_tutor_question", {
+        question,
+      });
     } catch {
       alert("AI Tutor connection failed.");
     }
+  };
+
+  const exportToSheets = () => {
+    if (!latestResult) {
+      alert("Run a simulation first before exporting.");
+      return;
+    }
+
+    alert(
+      "Google Sheets export button is ready. Next step: add backend /export-to-sheets endpoint."
+    );
+
+    logEvent(analytics, "export_to_sheets_clicked", {
+      system: latestResult.system,
+      winner: latestResult.winner,
+    });
   };
 
   return (
@@ -188,12 +261,15 @@ function App() {
           <h1 className="text-3xl font-bold">
             Electra<span className="text-purple-400">Mind</span>
           </h1>
-          <p className="text-sm text-gray-400">AI-Powered Election Simulator</p>
+          <p className="text-sm text-gray-400">
+            AI-Powered Election Simulator
+          </p>
         </div>
 
         <nav className="space-y-3">
           {sidebarItems.map((item, index) => {
             const Icon = item.icon;
+
             return (
               <div
                 key={item.label}
@@ -231,16 +307,27 @@ function App() {
         <header className="flex justify-between items-center">
           <div>
             <h2 className="text-3xl font-bold">Welcome back! 👋</h2>
-            <p className="text-gray-400">Learn how voting systems can change election outcomes.</p>
+            <p className="text-gray-400">
+              Learn how voting systems can change election outcomes.
+            </p>
           </div>
 
           {user ? (
             <div className="hidden md:flex items-center gap-3 bg-white/5 px-4 py-3 rounded-2xl border border-white/10">
-              <img src={user.photoURL} alt={user.displayName} className="w-10 h-10 rounded-full" />
+              <img
+                src={user.photoURL}
+                alt={user.displayName}
+                className="w-10 h-10 rounded-full"
+              />
+
               <div>
                 <p className="font-semibold">{user.displayName}</p>
-                <button onClick={logout} className="text-xs text-red-300 flex items-center gap-1">
-                  <LogOut size={12} /> Logout
+                <button
+                  onClick={logoutUser}
+                  className="text-xs text-red-300 flex items-center gap-1"
+                >
+                  <LogOut size={12} />
+                  Logout
                 </button>
               </div>
             </div>
@@ -278,6 +365,7 @@ function App() {
                 value={voterInput}
                 onChange={(e) => setVoterInput(e.target.value)}
                 className="mt-2 w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none"
+                placeholder="1000"
               />
             </div>
 
@@ -308,8 +396,16 @@ function App() {
 
         <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
           <StatCard title="Simulations Run" value={simulationCount} icon="🎮" />
-          <StatCard title="Selected System" value={activeSystemName} icon="⚖️" />
-          <StatCard title="Total Voters" value={totalVotes.toLocaleString()} icon="👥" />
+          <StatCard
+            title="Selected System"
+            value={activeSystemName}
+            icon="⚖️"
+          />
+          <StatCard
+            title="Total Voters"
+            value={totalVotes.toLocaleString()}
+            icon="👥"
+          />
           <StatCard title="Turnout" value={`${turnout}%`} icon="🧠" />
         </section>
 
@@ -317,14 +413,20 @@ function App() {
           <div className="xl:col-span-3 card">
             <div className="flex justify-between items-center mb-5">
               <h3 className="text-xl font-bold">Live Simulation</h3>
-              <span className="text-sm text-green-400">● {activeSystemName}</span>
+              <span className="text-sm text-green-400">
+                ● {activeSystemName}
+              </span>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
               <div className="panel">
                 <h4 className="font-semibold mb-4">Candidates</h4>
+
                 {voteData.map((item) => (
-                  <div key={item.name} className="flex justify-between py-3 text-sm">
+                  <div
+                    key={item.name}
+                    className="flex justify-between py-3 text-sm"
+                  >
                     <span>Candidate {item.name}</span>
                     <span>{item.percent}%</span>
                   </div>
@@ -332,10 +434,14 @@ function App() {
               </div>
 
               <div className="panel text-center">
-                <div className="text-4xl font-bold mt-8">{totalVotes.toLocaleString()}</div>
+                <div className="text-4xl font-bold mt-8">
+                  {totalVotes.toLocaleString()}
+                </div>
                 <p className="text-gray-400">Votes Counted</p>
 
-                <div className="mt-6 text-purple-300 font-bold">{turnout}%</div>
+                <div className="mt-6 text-purple-300 font-bold">
+                  {turnout}%
+                </div>
                 <p className="text-sm text-gray-400">Voter Turnout</p>
 
                 <div className="mt-6 text-green-400 font-bold text-lg">
@@ -350,7 +456,12 @@ function App() {
                     <XAxis dataKey="time" stroke="#777" />
                     <YAxis stroke="#777" />
                     <Tooltip />
-                    <Line type="monotone" dataKey="votes" stroke="#a855f7" strokeWidth={3} />
+                    <Line
+                      type="monotone"
+                      dataKey="votes"
+                      stroke="#a855f7"
+                      strokeWidth={3}
+                    />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -370,15 +481,21 @@ function App() {
           <section className="card">
             <div className="flex items-center gap-2 mb-4">
               <GitCompare className="text-purple-400" />
-              <h3 className="text-xl font-bold">Ranked Choice Round History</h3>
+              <h3 className="text-xl font-bold">
+                Ranked Choice Round History
+              </h3>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {roundHistory.map((round) => (
                 <div key={round.round} className="panel">
                   <h4 className="font-semibold mb-3">Round {round.round}</h4>
+
                   {Object.entries(round.votes).map(([candidate, votes]) => (
-                    <div key={candidate} className="flex justify-between text-sm py-2 border-b border-white/5">
+                    <div
+                      key={candidate}
+                      className="flex justify-between text-sm py-2 border-b border-white/5"
+                    >
                       <span>Candidate {candidate}</span>
                       <span>{votes} votes</span>
                     </div>
@@ -392,12 +509,13 @@ function App() {
         <section className="grid grid-cols-1 xl:grid-cols-3 gap-5">
           <ChartCard title="Results Overview" type="pie" data={voteData} />
           <ChartCard title="Results by Candidate" type="bar" data={voteData} />
+
           <div className="card">
             <h3 className="text-xl font-bold mb-4">Why This Matters</h3>
             <p className="text-gray-300">
-              ElectraMind shows that election results are not only about votes, but also about
-              the voting system used. The same voters can produce different winners under
-              different rules.
+              ElectraMind shows that election results are not only about votes,
+              but also about the voting system used. The same voters can produce
+              different winners under different rules.
             </p>
           </div>
         </section>
@@ -406,22 +524,61 @@ function App() {
           <div className="card">
             <h3 className="text-xl font-bold mb-4">What If Scenario</h3>
             <p className="text-gray-400 mb-4">
-              Change candidates, voter count, or voting system above, then run the simulation again.
+              Change candidates, voter count, or voting system above, then run
+              the simulation again.
             </p>
-            <button
-              onClick={runSimulation}
-              className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600"
-            >
-              ▶ Run Scenario
-            </button>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={runSimulation}
+                disabled={loading}
+                className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 disabled:opacity-60"
+              >
+                ▶ Run Scenario
+              </button>
+
+              <button
+                onClick={exportToSheets}
+                className="px-6 py-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10"
+              >
+                Export to Google Sheets
+              </button>
+            </div>
           </div>
 
           <div className="card">
             <h3 className="text-xl font-bold mb-4">Compare Voting Systems</h3>
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-center">
-              <MiniCard title="FPTP" winner={comparison?.fptp?.winner ? `Candidate ${comparison.fptp.winner}` : "Run simulation"} active={votingSystem === "fptp"} />
-              <MiniCard title="Ranked Choice" winner={comparison?.ranked?.winner ? `Candidate ${comparison.ranked.winner}` : "Run simulation"} active={votingSystem === "ranked"} />
-              <MiniCard title="Proportional" winner={comparison?.proportional?.winner ? `Top: ${comparison.proportional.winner}` : "Run simulation"} active={votingSystem === "proportional"} />
+              <MiniCard
+                title="FPTP"
+                winner={
+                  comparison?.fptp?.winner
+                    ? `Candidate ${comparison.fptp.winner}`
+                    : "Run simulation"
+                }
+                active={votingSystem === "fptp"}
+              />
+
+              <MiniCard
+                title="Ranked Choice"
+                winner={
+                  comparison?.ranked?.winner
+                    ? `Candidate ${comparison.ranked.winner}`
+                    : "Run simulation"
+                }
+                active={votingSystem === "ranked"}
+              />
+
+              <MiniCard
+                title="Proportional"
+                winner={
+                  comparison?.proportional?.winner
+                    ? `Top: ${comparison.proportional.winner}`
+                    : "Run simulation"
+                }
+                active={votingSystem === "proportional"}
+              />
             </div>
           </div>
         </section>
@@ -476,7 +633,10 @@ function AITutor({ explanation, question, setQuestion, aiAnswer, askAI }) {
         placeholder="Ask about FPTP, ranked, turnout..."
       />
 
-      <button onClick={askAI} className="mt-3 w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 font-semibold">
+      <button
+        onClick={askAI}
+        className="mt-3 w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 font-semibold"
+      >
         Ask AI Tutor
       </button>
     </div>
@@ -487,10 +647,17 @@ function ChartCard({ title, type, data }) {
   return (
     <div className="card">
       <h3 className="text-xl font-bold mb-4">{title}</h3>
+
       <ResponsiveContainer width="100%" height={230}>
         {type === "pie" ? (
           <PieChart>
-            <Pie data={data} dataKey="votes" nameKey="name" innerRadius={55} outerRadius={85}>
+            <Pie
+              data={data}
+              dataKey="votes"
+              nameKey="name"
+              innerRadius={55}
+              outerRadius={85}
+            >
               {data.map((_, i) => (
                 <Cell key={i} fill={chartColors[i % chartColors.length]} />
               ))}
@@ -511,7 +678,11 @@ function ChartCard({ title, type, data }) {
 
 function MiniCard({ title, winner, active }) {
   return (
-    <div className={`p-4 rounded-2xl border ${active ? "border-green-400 bg-green-500/10" : "border-white/10 bg-white/5"}`}>
+    <div
+      className={`p-4 rounded-2xl border ${
+        active ? "border-green-400 bg-green-500/10" : "border-white/10 bg-white/5"
+      }`}
+    >
       <h4 className="font-bold">{title}</h4>
       <p className="text-sm text-gray-400 mt-2">Result</p>
       <p className="font-semibold">{winner}</p>
@@ -520,4 +691,3 @@ function MiniCard({ title, winner, active }) {
 }
 
 export default App;
-
