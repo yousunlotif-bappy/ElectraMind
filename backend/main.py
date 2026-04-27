@@ -49,3 +49,53 @@ def ask_ai(data: dict):
 
 
     return {"answer": answer}
+
+
+from datetime import datetime
+import os, json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+def get_sheets_service():
+    service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+
+    credentials = service_account.Credentials.from_service_account_info(
+        service_account_info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+
+    return build("sheets", "v4", credentials=credentials)
+
+
+@app.post("/export-to-sheets")
+def export_to_sheets(data: dict):
+    try:
+        service = get_sheets_service()
+
+        row = [
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            data.get("email", ""),
+            ", ".join(data.get("candidates", [])),
+            data.get("voters", ""),
+            data.get("systemName", ""),
+            data.get("winner", ""),
+            data.get("turnout", ""),
+            data.get("totalVotes", ""),
+        ]
+
+        body = {"values": [row]}
+
+        service.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range="Sheet1!A:H",
+            valueInputOption="USER_ENTERED",
+            body=body,
+        ).execute()
+
+        return {"success": True}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
